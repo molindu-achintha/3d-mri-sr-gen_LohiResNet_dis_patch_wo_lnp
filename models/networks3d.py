@@ -29,7 +29,7 @@ def get_norm_layer(norm_type='instance'):
 
 def define_G(input_nc, output_nc, ngf, which_model_netG, norm='batch',
              use_dropout=False, gpu_ids=[], scale_factor=4, n_fmdrb=6,
-             skip_compress_ratio=0.5):
+             skip_compress_ratio=0.5, input_size=128):
     use_gpu = len(gpu_ids) > 0
 
     if use_gpu:
@@ -40,7 +40,7 @@ def define_G(input_nc, output_nc, ngf, which_model_netG, norm='batch',
     if scale_factor != 1:
         print("ResUNetGenerator3D outputs the input spatial size; ignoring scale_factor=%s." % scale_factor)
 
-    netG = ResUNetGenerator3D(input_nc, output_nc, base_filters=ngf)
+    netG = ResUNetGenerator3D(input_nc, output_nc, base_filters=ngf, input_size=input_size)
     if len(gpu_ids) > 0:
         netG.cuda(gpu_ids[0])
     return netG
@@ -123,7 +123,7 @@ class GANLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-#  128^3 ResUNet generator
+#  64^3/128^3 ResUNet generator
 # ---------------------------------------------------------------------------
 
 
@@ -195,33 +195,41 @@ class UpResBlock3D(nn.Module):
 
 
 class ResUNetGenerator3D(nn.Module):
-    """3D U-Net generator with residual blocks for same-size 128^3 outputs."""
+    """3D U-Net generator with residual blocks for same-size 64^3/128^3 outputs."""
 
     def __init__(self, in_channels: int = 1, out_channels: int = 1,
-                 base_filters: int = 64):
+                 base_filters: int = 64, input_size: int = 128):
         super().__init__()
 
         f = base_filters
+        self.input_size = int(input_size)
+        self.num_downs = 6 if self.input_size == 64 else 7
 
         self.enc1 = DownResBlock3D(in_channels, f, use_norm=False)
         self.enc2 = DownResBlock3D(f, f * 2)
         self.enc3 = DownResBlock3D(f * 2, f * 4)
         self.enc4 = DownResBlock3D(f * 4, f * 8)
         self.enc5 = DownResBlock3D(f * 8, f * 8)
-        self.enc6 = DownResBlock3D(f * 8, f * 8)
-        # The 128^3 path reaches 1x1x1 here, so normalization must stay off.
-        self.enc7 = DownResBlock3D(f * 8, f * 8, use_norm=False)
+        # The 64^3 path reaches 1x1x1 at enc6; the 128^3 path reaches it at enc7.
+        self.enc6 = DownResBlock3D(f * 8, f * 8, use_norm=self.num_downs == 7)
+        if self.num_downs == 7:
+            self.enc7 = DownResBlock3D(f * 8, f * 8, use_norm=False)
 
         self.dec1 = UpResBlock3D(f * 8, f * 8, dropout=True)
         self.dec2 = UpResBlock3D(f * 16, f * 8, dropout=True)
         self.dec3 = UpResBlock3D(f * 16, f * 8, dropout=True)
-        self.dec4 = UpResBlock3D(f * 16, f * 4, dropout=False)
-        self.dec5 = UpResBlock3D(f * 8, f * 2, dropout=False)
-        self.dec6 = UpResBlock3D(f * 4, f, dropout=False)
+        if self.num_downs == 6:
+            self.dec4 = UpResBlock3D(f * 12, f * 4, dropout=False)
+            self.dec5 = UpResBlock3D(f * 6, f * 2, dropout=False)
+        else:
+            self.dec4 = UpResBlock3D(f * 16, f * 4, dropout=False)
+            self.dec5 = UpResBlock3D(f * 8, f * 2, dropout=False)
+            self.dec6 = UpResBlock3D(f * 4, f, dropout=False)
 
+        final_in_channels = f * 3 if self.num_downs == 6 else f * 2
         self.final = nn.Sequential(
             nn.ReLU(inplace=False),
-            nn.ConvTranspose3d(f * 2, out_channels, kernel_size=4,
+            nn.ConvTranspose3d(final_in_channels, out_channels, kernel_size=4,
                                stride=2, padding=1),
             nn.Tanh(),
         )
@@ -245,8 +253,26 @@ class ResUNetGenerator3D(nn.Module):
         e4 = self.enc4(e3)
         e5 = self.enc5(e4)
         e6 = self.enc6(e5)
-        e7 = self.enc7(e6)
 
+        if self.num_downs == 6:
+            d1 = self.dec1(e6)
+            d1 = torch.cat([d1, e5], dim=1)
+
+            d2 = self.dec2(d1)
+            d2 = torch.cat([d2, e4], dim=1)
+
+            d3 = self.dec3(d2)
+            d3 = torch.cat([d3, e3], dim=1)
+
+            d4 = self.dec4(d3)
+            d4 = torch.cat([d4, e2], dim=1)
+
+            d5 = self.dec5(d4)
+            d5 = torch.cat([d5, e1], dim=1)
+
+            return self.final(d5)
+
+        e7 = self.enc7(e6)
         d1 = self.dec1(e7)
         d1 = torch.cat([d1, e6], dim=1)
 

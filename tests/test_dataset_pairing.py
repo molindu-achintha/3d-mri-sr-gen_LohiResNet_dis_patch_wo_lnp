@@ -5,15 +5,21 @@ import sys
 
 import numpy as np
 import pytest
+import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from train import PairedVolumeDataset  # noqa: E402
+from train import PairedPatchVolumeDataset, PairedVolumeDataset  # noqa: E402
 
 
 def _write_npy(path, value=0.0):
     path.parent.mkdir(parents=True, exist_ok=True)
     np.save(path, np.full((4, 4, 4), value, dtype=np.float32))
+
+
+def _write_npy_array(path, array):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, array.astype(np.float32))
 
 
 def _stem(path):
@@ -105,3 +111,62 @@ def test_traina_trainb_layout_still_supported(tmp_path):
     assert ds.lr_dir.name == "trainA"
     assert ds.hr_dir.name == "trainB"
     assert len(ds) == 1
+
+
+def test_patch_dataset_extracts_eight_aligned_64_cubes(tmp_path):
+    pytest.importorskip("torchio")
+    dataroot = tmp_path / "processed"
+    volume = np.arange(128 * 128 * 128, dtype=np.float32).reshape(128, 128, 128)
+    _write_npy_array(dataroot / "LR" / "subject1.npy", volume)
+    _write_npy_array(dataroot / "HR" / "subject1.npy", volume)
+
+    ds = PairedPatchVolumeDataset(
+        dataroot=dataroot,
+        phase="train",
+        no_flip=True,
+        depth_size=128,
+        fine_size=128,
+        patch_size=64,
+        patch_overlap=0,
+        input_nc=1,
+        output_nc=1,
+    )
+
+    assert len(ds) == 8
+    sample = ds[0]
+    assert sample["A"].shape == (1, 64, 64, 64)
+    assert sample["B"].shape == (1, 64, 64, 64)
+    assert torch.equal(sample["A"], sample["B"])
+
+    locations = {tuple(int(v) for v in ds[i]["location"]) for i in range(len(ds))}
+    expected_locations = {
+        (d, h, w, d + 64, h + 64, w + 64)
+        for d in (0, 64)
+        for h in (0, 64)
+        for w in (0, 64)
+    }
+    assert locations == expected_locations
+
+
+def test_patch_dataset_keeps_lr_hr_patch_coordinates_matched(tmp_path):
+    pytest.importorskip("torchio")
+    dataroot = tmp_path / "processed"
+    volume = np.arange(128 * 128 * 128, dtype=np.float32).reshape(128, 128, 128)
+    _write_npy_array(dataroot / "LR" / "subject1.npy", volume)
+    _write_npy_array(dataroot / "HR" / "subject1.npy", volume)
+
+    ds = PairedPatchVolumeDataset(
+        dataroot=dataroot,
+        phase="train",
+        no_flip=True,
+        depth_size=128,
+        fine_size=128,
+        patch_size=64,
+        patch_overlap=0,
+        input_nc=1,
+        output_nc=1,
+    )
+
+    for index in range(len(ds)):
+        sample = ds[index]
+        assert torch.equal(sample["A"], sample["B"])

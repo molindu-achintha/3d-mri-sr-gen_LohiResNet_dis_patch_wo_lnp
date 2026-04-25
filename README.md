@@ -2,20 +2,21 @@
 
 This project trains a pix2pix-style 3D MRI translation model with a single active generator: `resunet_3d`.
 
-The current generator is a residual 3D U-Net adapted for `128x128x128` volumes. It downsamples seven times to a `1x1x1` bottleneck, then decodes back to the input spatial size.
+The current generator is a residual 3D U-Net adapted for TorchIO `64x64x64` patch training and legacy full-volume `128x128x128` training. It decodes back to the input spatial size.
 
 ## Current Generator
 
 - Active generator: `ResUNetGenerator3D`
 - CLI name: `resunet_3d`
 - Input shape: `(B, C, D, H, W)`
-- Recommended spatial size: `128x128x128`
+- Default training input: `64x64x64` TorchIO grid patches
+- Full-volume compatibility: `128x128x128` with `--patch_size 0`
 - Output shape: same spatial size as input
 - `scale_factor` is forced to `1`
 - Legacy generator names such as `mdrn_3d`, `unet_128`, and `unet_256` are ignored and routed to `resunet_3d`
 - Legacy options `n_fmdrb` and `skip_compress_ratio` are kept only for old command compatibility
 
-The deepest encoder block disables normalization so batch size `1` works when the bottleneck reaches `1x1x1`.
+The deepest encoder block disables normalization so batch size `1` works when the bottleneck reaches `1x1x1`; the 64-cube path uses six downsampling stages, and the 128-cube path uses seven.
 
 ## Setup
 
@@ -55,7 +56,7 @@ For multi-LR datasets, LR filenames can use the HR subject name as a prefix. For
 
 ## Training
 
-Same-size `128x128x128` single-channel training:
+Default patch-wise single-channel training resizes volumes to `128x128x128`, then trains on non-overlapping `64x64x64` patches:
 
 ```bash
 python train.py \
@@ -67,7 +68,7 @@ python train.py \
   --fineSize 128 --depthSize 128 \
   --batchSize 1 \
   --device cuda \
-  --name mri_resunet_128
+  --name mri_resunet_64_patches
 ```
 
 Using `processed/LR` and `processed/HR`:
@@ -81,6 +82,7 @@ python train.py \
   --which_model_netG resunet_3d \
   --which_model_netD basic \
   --fineSize 128 --depthSize 128 \
+  --patch_size 64 --patch_overlap 0 \
   --batchSize 1 \
   --device cuda \
   --name mri_resunet_lr_hr
@@ -97,8 +99,11 @@ python train.py \
   --device cuda \
   --research_profile balanced_mri_sr_v1 \
   --fineSize 128 --depthSize 128 \
+  --patch_size 64 --patch_overlap 0 \
   --name mri_resunet_balanced_v1
 ```
+
+Use `--patch_size 0` to disable TorchIO patch extraction and train on full volumes.
 
 Checkpoints and logs are saved under:
 

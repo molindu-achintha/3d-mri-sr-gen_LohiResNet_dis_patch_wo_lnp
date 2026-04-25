@@ -1,4 +1,4 @@
-"""Unit tests for the active 128^3 ResUNet generator."""
+"""Unit tests for the active 3D ResUNet generator."""
 
 import os
 import sys
@@ -20,6 +20,16 @@ def test_resunet3d_shape_128():
     assert y.shape == (1, 1, 128, 128, 128)
 
 
+def test_resunet3d_shape_64():
+    gen = ResUNetGenerator3D(in_channels=1, out_channels=1, base_filters=1, input_size=64)
+    x = torch.randn(1, 1, 64, 64, 64)
+
+    with torch.no_grad():
+        y = gen(x)
+
+    assert y.shape == (1, 1, 64, 64, 64)
+
+
 def test_resunet3d_multichannel():
     gen = ResUNetGenerator3D(in_channels=3, out_channels=2, base_filters=1)
     x = torch.randn(1, 3, 128, 128, 128)
@@ -33,6 +43,17 @@ def test_resunet3d_multichannel():
 def test_resunet3d_gradient_flow():
     gen = ResUNetGenerator3D(in_channels=1, out_channels=1, base_filters=1)
     x = torch.randn(1, 1, 128, 128, 128)
+
+    y = gen(x)
+    y.mean().backward()
+
+    no_grad = [name for name, p in gen.named_parameters() if p.requires_grad and p.grad is None]
+    assert no_grad == []
+
+
+def test_resunet3d_gradient_flow_64():
+    gen = ResUNetGenerator3D(in_channels=1, out_channels=1, base_filters=1, input_size=64)
+    x = torch.randn(1, 1, 64, 64, 64)
 
     y = gen(x)
     y.mean().backward()
@@ -61,9 +82,31 @@ def test_define_g_returns_resunet_for_legacy_name():
         assert gen(x).shape == x.shape
 
 
+def test_define_g_configures_64_cube_path():
+    gen = define_G(
+        input_nc=1,
+        output_nc=1,
+        ngf=1,
+        which_model_netG="resunet_3d",
+        norm="instance",
+        use_dropout=False,
+        gpu_ids=[],
+        scale_factor=1,
+        input_size=64,
+    )
+    x = torch.randn(1, 1, 64, 64, 64)
+
+    assert isinstance(gen, ResUNetGenerator3D)
+    with torch.no_grad():
+        assert gen(x).shape == x.shape
+
+
 if __name__ == "__main__":
     test_resunet3d_shape_128()
+    test_resunet3d_shape_64()
     test_resunet3d_multichannel()
     test_resunet3d_gradient_flow()
+    test_resunet3d_gradient_flow_64()
     test_define_g_returns_resunet_for_legacy_name()
+    test_define_g_configures_64_cube_path()
     print("All ResUNet3D generator tests passed.")

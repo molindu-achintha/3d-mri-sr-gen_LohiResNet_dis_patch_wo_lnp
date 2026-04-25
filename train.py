@@ -6,7 +6,7 @@ implementations with a simple paired-volume dataset loader. It supports
 low-resolution and high-resolution volumes live in sibling folders. It
 supports both `trainA/trainB` layouts and `LR/HR` layouts.
 
-Typical usage (same-size 128^3, single-channel MRI):
+Typical usage (128^3 volumes -> non-overlapping 64^3 training patches):
 
     python train.py \
         --dataroot /path/to/dataset \
@@ -14,6 +14,7 @@ Typical usage (same-size 128^3, single-channel MRI):
         --input_nc 1 --output_nc 1 \
         --which_model_netG resunet_3d --which_model_netD basic \
         --fineSize 128 --depthSize 128 \
+        --patch_size 64 --patch_overlap 0 \
         --batchSize 2 --niter 50 --niter_decay 50
 
 Using `processed/LR` and `processed/HR`:
@@ -80,6 +81,24 @@ from options.train_options import TrainOptions
 
 
 ALLOWED_EXTS = {".npy", ".npz", ".nii", ".nii.gz"}
+
+
+def _import_torchio():
+    try:
+        import torchio as tio
+    except ImportError as exc:  # pragma: no cover - depends on runtime env
+        raise RuntimeError(
+            "TorchIO is required for patch training. Install it with `pip install torchio` "
+            "or pass `--patch_size 0` to train on full volumes."
+        ) from exc
+    return tio
+
+
+def _patch_tuple(patch_size: int) -> Tuple[int, int, int]:
+    size = int(patch_size)
+    if size <= 0:
+        raise ValueError("patch_size must be a positive integer when patch training is enabled.")
+    return (size, size, size)
 
 
 def _load_volume(path: Path) -> np.ndarray:
@@ -415,13 +434,7 @@ class PairedVolumeDataset(Dataset):
             return path.name[:-7]
         return path.stem
 
-    # ------------------------------------------------------------------
-    # Dataset API
-    # ------------------------------------------------------------------
-    def __len__(self) -> int:
-        return len(self.pairs)
-
-    def __getitem__(self, index: int):
+    def _load_pair_tensors(self, index: int, apply_flip: bool = True) -> Dict[str, torch.Tensor]:
         pair = self.pairs[index]
 
         lr_np = _load_volume(pair.lr)
@@ -430,7 +443,7 @@ class PairedVolumeDataset(Dataset):
         lr_t = _to_tensor(lr_np, self.input_nc)
         hr_t = _to_tensor(hr_np, self.output_nc)
 
-        # Resize to expected shapes
+        # Resize to expected full-volume shapes before optional patch extraction.
         if self.depth_size and self.fine_size:
             lr_t = _resize_volume(lr_t, (self.depth_size, self.fine_size, self.fine_size))
 
@@ -441,7 +454,7 @@ class PairedVolumeDataset(Dataset):
         )
         hr_t = _resize_volume(hr_t, hr_target)
 
-        if not self.no_flip:
+        if apply_flip and not self.no_flip:
             if random.random() > 0.5:
                 lr_t = torch.flip(lr_t, dims=[2])  # H flip
                 hr_t = torch.flip(hr_t, dims=[2])
@@ -453,6 +466,94 @@ class PairedVolumeDataset(Dataset):
                 hr_t = torch.flip(hr_t, dims=[1])
 
         return {"A": lr_t, "B": hr_t}
+
+    # ------------------------------------------------------------------
+    # Dataset API
+    # ------------------------------------------------------------------
+    def __len__(self) -> int:
+        return len(self.pairs)
+
+    def __getitem__(self, index: int):
+        return self._load_pair_tensors(index, apply_flip=True)
+
+
+class PairedPatchVolumeDataset(PairedVolumeDataset):
+    """Paired LR/HR dataset that yields aligned TorchIO grid patches."""
+
+    def __init__(
+        self,
+        *args,
+        patch_size: int = 64,
+        patch_overlap: int = 0,
+        **kwargs,
+    ) -> None:
+        self.patch_size = int(patch_size)
+        self.patch_overlap = int(patch_overlap)
+        if self.patch_size <= 0:
+            raise ValueError("PairedPatchVolumeDataset requires patch_size > 0.")
+        if self.patch_overlap < 0:
+            raise ValueError("patch_overlap must be >= 0.")
+        if self.patch_overlap >= self.patch_size:
+            raise ValueError("patch_overlap must be smaller than patch_size.")
+
+        self._tio = _import_torchio()
+        super().__init__(*args, **kwargs)
+        self._patch_shape = _patch_tuple(self.patch_size)
+        self._patch_index: List[Tuple[int, int]] = self._build_patch_index()
+
+    def _make_subject(self, tensors: Dict[str, torch.Tensor]):
+        return self._tio.Subject(
+            A=self._tio.ScalarImage(tensor=tensors["A"]),
+            B=self._tio.ScalarImage(tensor=tensors["B"]),
+        )
+
+    def _make_sampler(self, pair_index: int, apply_flip: bool):
+        tensors = self._load_pair_tensors(pair_index, apply_flip=apply_flip)
+        if tensors["A"].shape[1:] != tensors["B"].shape[1:]:
+            raise ValueError(
+                "Patch training requires LR and HR tensors to have the same spatial shape; "
+                f"got A={tuple(tensors['A'].shape)} and B={tuple(tensors['B'].shape)}."
+            )
+        if any(dim < self.patch_size for dim in tensors["A"].shape[1:]):
+            raise ValueError(
+                f"Patch size {self.patch_size} does not fit volume shape "
+                f"{tuple(tensors['A'].shape[1:])}."
+            )
+        subject = self._make_subject(tensors)
+        return self._tio.GridSampler(
+            subject,
+            patch_size=self._patch_shape,
+            patch_overlap=self.patch_overlap,
+        )
+
+    def _build_patch_index(self) -> List[Tuple[int, int]]:
+        patch_index: List[Tuple[int, int]] = []
+        for pair_index in range(len(self.pairs)):
+            sampler = self._make_sampler(pair_index, apply_flip=False)
+            patch_index.extend((pair_index, patch_index_in_pair) for patch_index_in_pair in range(len(sampler)))
+        if not patch_index:
+            raise RuntimeError("TorchIO GridSampler produced no patches.")
+        print(
+            "Patch summary: "
+            f"patch_size={self.patch_size}, patch_overlap={self.patch_overlap}, "
+            f"patches={len(patch_index)}"
+        )
+        return patch_index
+
+    def __len__(self) -> int:
+        return len(self._patch_index)
+
+    def __getitem__(self, index: int):
+        pair_index, patch_index = self._patch_index[index]
+        sampler = self._make_sampler(pair_index, apply_flip=True)
+        sample = sampler[patch_index]
+        result = {
+            "A": sample["A"][self._tio.DATA].float(),
+            "B": sample["B"][self._tio.DATA].float(),
+        }
+        if self._tio.LOCATION in sample:
+            result["location"] = sample[self._tio.LOCATION]
+        return result
 
 
 def set_seed(seed: int = 42) -> None:
@@ -480,14 +581,17 @@ def train(perceptual_model=None):
     _ensure_header(iter_log_path, ["epoch", "iter", "total_steps"] + loss_keys)
     _ensure_header(epoch_log_path, ["epoch", "total_steps"] + loss_keys)
 
-    dataset = PairedVolumeDataset(
+    full_depth_size = opt.depthSize
+    full_fine_size = opt.fineSize
+    patch_size = int(getattr(opt, "patch_size", 64))
+    dataset_kwargs = dict(
         dataroot=opt.dataroot,
         phase=opt.phase,
         lr_subdir=opt.lr_subdir,
         hr_subdir=opt.hr_subdir,
         scale_factor=opt.scale_factor,
-        depth_size=opt.depthSize,
-        fine_size=opt.fineSize,
+        depth_size=full_depth_size,
+        fine_size=full_fine_size,
         resize_or_crop=opt.resize_or_crop,
         max_dataset_size=opt.max_dataset_size,
         no_flip=opt.no_flip,
@@ -495,6 +599,22 @@ def train(perceptual_model=None):
         input_nc=opt.input_nc,
         output_nc=opt.output_nc,
     )
+
+    if patch_size > 0:
+        dataset = PairedPatchVolumeDataset(
+            **dataset_kwargs,
+            patch_size=patch_size,
+            patch_overlap=getattr(opt, "patch_overlap", 0),
+        )
+        opt.depthSize = patch_size
+        opt.fineSize = patch_size
+        print(
+            "Patch training enabled: "
+            f"full_volume=({full_depth_size}, {full_fine_size}, {full_fine_size}), "
+            f"effective_model_input=({opt.depthSize}, {opt.fineSize}, {opt.fineSize})"
+        )
+    else:
+        dataset = PairedVolumeDataset(**dataset_kwargs)
 
     dataloader = DataLoader(
         dataset,

@@ -57,6 +57,10 @@ class BaseOptions():
         self.parser.add_argument('--max_dataset_size', type=int, default=float("inf"), help='maximum # of samples')
         self.parser.add_argument('--resize_or_crop', type=str, default='resize_and_crop', help='scaling/cropping mode')
         self.parser.add_argument('--no_flip', action='store_true', help='if specified, do not flip images')
+        self.parser.add_argument('--patch_size', type=int, default=64,
+                                 help='TorchIO cube patch size for training; use 0 to train on full volumes')
+        self.parser.add_argument('--patch_overlap', type=int, default=0,
+                                 help='TorchIO grid patch overlap in voxels')
         self.parser.add_argument('--scale_factor', type=int, default=1,
                                  help='legacy SR scale; forced to 1 because resunet_3d outputs input size')
         self.parser.add_argument('--n_fmdrb', type=int, default=6,
@@ -138,6 +142,12 @@ class BaseOptions():
         if self.opt.scale_factor != 1:
             print("resunet_3d outputs the input spatial size; forcing scale_factor=1.")
             self.opt.scale_factor = 1
+        if self.opt.patch_size < 0:
+            raise ValueError('--patch_size must be >= 0.')
+        if self.opt.patch_overlap < 0:
+            raise ValueError('--patch_overlap must be >= 0.')
+        if self.opt.patch_size > 0 and self.opt.patch_overlap >= self.opt.patch_size:
+            raise ValueError('--patch_overlap must be smaller than --patch_size.')
 
         str_ids = self.opt.gpu_ids.split(',')
         self.opt.gpu_ids = []

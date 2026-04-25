@@ -187,6 +187,23 @@ def test_injected_perceptual_model_contributes_and_backprops(tmp_path):
     assert any(g is not None and torch.any(g != 0) for g in grads)
 
 
+def test_pix2pix_optimizes_one_64_cube_patch(tmp_path):
+    opt = _make_opt(tmp_path, use_perceptual=False)
+    opt.depthSize = 64
+    opt.fineSize = 64
+    model = Pix2Pix3dModel()
+    model.initialize(opt)
+    data = {
+        "A": torch.randn(1, 1, opt.depthSize, opt.fineSize, opt.fineSize),
+        "B": torch.randn(1, 1, opt.depthSize, opt.fineSize, opt.fineSize),
+    }
+    model.set_input(data)
+    model.optimize_parameters()
+
+    assert tuple(model.fake_B.shape) == (1, 1, 64, 64, 64)
+    assert model.loss_G_L1.item() > 0.0
+
+
 def test_dino_slice_conversion_shape():
     recorder = Recording2DModel()
     extractor = DinoV3FeatureExtractor(recorder, input_size=32)
@@ -195,6 +212,16 @@ def test_dino_slice_conversion_shape():
 
     assert recorder.last_shape == (10, 3, 32, 32)
     assert features.shape[0] == 10
+
+
+def test_dino_slice_conversion_shape_for_64_cube_patch():
+    recorder = Recording2DModel()
+    extractor = DinoV3FeatureExtractor(recorder, input_size=32)
+    x = torch.randn(2, 1, 64, 64, 64)
+    features = extractor.extract_features(x)
+
+    assert recorder.last_shape == (128, 3, 32, 32)
+    assert features.shape[0] == 128
 
 
 def test_dino_prefers_intermediate_patch_maps():

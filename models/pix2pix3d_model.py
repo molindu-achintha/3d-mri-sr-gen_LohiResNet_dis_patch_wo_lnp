@@ -40,7 +40,8 @@ class Pix2Pix3dModel(BaseModel):
         self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf,
                                       opt.which_model_netG, opt.norm,
                                       not opt.no_dropout, self.gpu_ids,
-                                      scale_factor=self.scale_factor)
+                                      scale_factor=self.scale_factor,
+                                      input_size=opt.depthSize)
         if self.isTrain:
             use_sigmoid = False  # not used with WGAN-GP
             self.netD = networks.define_D(opt.input_nc + opt.output_nc, opt.ndf,
