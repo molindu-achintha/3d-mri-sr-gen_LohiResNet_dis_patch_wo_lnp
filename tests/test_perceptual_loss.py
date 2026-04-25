@@ -282,7 +282,7 @@ def test_missing_monai_dependency_raises_clear_error(monkeypatch):
     def _raise():
         raise RuntimeError("MONAI is required for SwinUNETR perceptual loss.")
 
-    monkeypatch.setattr("models.perceptual_loss._get_monai_swinunetr_class", _raise)
+    monkeypatch.setattr("models.perceptual_builders._get_monai_swinunetr_class", _raise)
     with pytest.raises(RuntimeError, match="MONAI"):
         build_perceptual_extractor(opt)
 
@@ -351,14 +351,14 @@ def test_local_dinov3_repo_loader_bypasses_timm(tmp_path, monkeypatch):
             model.factory_args = {"pretrained": pretrained, "weights": weights}
             return model
 
-    monkeypatch.setattr("models.perceptual_loss._import_local_dinov3_backbones", lambda _repo: FakeBackbones)
+    monkeypatch.setattr("models.perceptual_builders._import_local_dinov3_backbones", lambda _repo: FakeBackbones)
     monkeypatch.setattr(
-        "models.perceptual_loss._get_timm_module",
+        "models.perceptual_builders._get_timm_module",
         lambda: (_ for _ in ()).throw(AssertionError("timm should not be used")),
     )
     loaded_checkpoints = []
     monkeypatch.setattr(
-        "models.perceptual_loss._load_weights",
+        "models.perceptual_builders._load_weights",
         lambda _model, ckpt_path: loaded_checkpoints.append(str(ckpt_path)),
     )
 
@@ -394,7 +394,7 @@ def test_unknown_local_dinov3_arch_raises_clear_error(tmp_path, monkeypatch):
         def dinov3_vitb16(pretrained=False, weights=None):
             return TinyPerceptual2D()
 
-    monkeypatch.setattr("models.perceptual_loss._import_local_dinov3_backbones", lambda _repo: FakeBackbones)
+    monkeypatch.setattr("models.perceptual_builders._import_local_dinov3_backbones", lambda _repo: FakeBackbones)
 
     opt = SimpleNamespace(
         perceptual_backbone="dinov3",
@@ -437,6 +437,6 @@ def test_invalid_dino_arch_raises_with_version_hint(monkeypatch):
         gpu_ids=[],
     )
 
-    monkeypatch.setattr("models.perceptual_loss._get_timm_module", lambda: FakeTimm())
+    monkeypatch.setattr("models.perceptual_builders._get_timm_module", lambda: FakeTimm())
     with pytest.raises(RuntimeError, match="Unknown DINO architecture 'this_model_does_not_exist'"):
         build_perceptual_extractor(opt)

@@ -49,27 +49,28 @@ def define_G(input_nc, output_nc, ngf, which_model_netG, norm='batch',
 def define_D(input_nc, ndf, which_model_netD,
              n_layers_D=3, norm='batch', use_sigmoid=False, gpu_ids=[],
              wgan_gp=False):
-    netD = None
     use_gpu = len(gpu_ids) > 0
     norm_layer = get_norm_layer(norm_type=norm)
 
     if use_gpu:
         assert torch.cuda.is_available()
     if which_model_netD == 'basic':
-        if wgan_gp:
-            netD = Critic3D(input_nc, ndf, n_layers=3, norm_layer=norm_layer,
-                             gpu_ids=gpu_ids)
-        else:
-            netD = NLayerDiscriminator(input_nc, ndf, n_layers=3, norm_layer=norm_layer, use_sigmoid=use_sigmoid, gpu_ids=gpu_ids)
+        n_layers = 3
     elif which_model_netD == 'n_layers':
-        if wgan_gp:
-            netD = Critic3D(input_nc, ndf, n_layers_D, norm_layer=norm_layer,
-                             gpu_ids=gpu_ids)
-        else:
-            netD = NLayerDiscriminator(input_nc, ndf, n_layers_D, norm_layer=norm_layer, use_sigmoid=use_sigmoid, gpu_ids=gpu_ids)
+        n_layers = n_layers_D
     else:
         raise NotImplementedError('Discriminator model name [%s] is not recognized' %
                                   which_model_netD)
+
+    netD = _make_discriminator(
+        input_nc=input_nc,
+        ndf=ndf,
+        n_layers=n_layers,
+        norm_layer=norm_layer,
+        use_sigmoid=use_sigmoid,
+        gpu_ids=gpu_ids,
+        wgan_gp=wgan_gp,
+    )
     if use_gpu:
         netD.cuda(gpu_ids[0])
     netD.apply(weights_init)
@@ -294,55 +295,76 @@ class ResUNetGenerator3D(nn.Module):
         return self.final(d6)
 
 
-class NLayerDiscriminator(nn.Module):
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm3d, use_sigmoid=False, gpu_ids=[]):
-        super(NLayerDiscriminator, self).__init__()
-        self.gpu_ids = gpu_ids
-        if type(norm_layer) == functools.partial:
-            use_bias = norm_layer.func == nn.InstanceNorm3d
-        else:
-            use_bias = norm_layer == nn.InstanceNorm3d
+def _make_discriminator(input_nc, ndf, n_layers, norm_layer, use_sigmoid, gpu_ids, wgan_gp):
+    if wgan_gp:
+        return Critic3D(input_nc, ndf, n_layers=n_layers, norm_layer=norm_layer, gpu_ids=gpu_ids)
+    return NLayerDiscriminator(
+        input_nc,
+        ndf,
+        n_layers=n_layers,
+        norm_layer=norm_layer,
+        use_sigmoid=use_sigmoid,
+        gpu_ids=gpu_ids,
+    )
 
-        kw = 4
-        padw = int(np.ceil((kw-1)/2))
-        sequence = [
-            nn.Conv3d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
-            nn.LeakyReLU(0.2, True)
-        ]
 
-        nf_mult = 1
-        nf_mult_prev = 1
-        for n in range(1, n_layers):
-            nf_mult_prev = nf_mult
-            nf_mult = min(2**n, 8)
-            sequence += [
-                nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
-                          kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-                norm_layer(ndf * nf_mult),
-                nn.LeakyReLU(0.2, True)
-            ]
+def _uses_bias(norm_layer) -> bool:
+    if type(norm_layer) == functools.partial:
+        return norm_layer.func == nn.InstanceNorm3d
+    return norm_layer == nn.InstanceNorm3d
 
+
+def _patchgan_layers(input_nc, ndf, n_layers, norm_layer, use_sigmoid=False):
+    use_bias = _uses_bias(norm_layer)
+    kw = 4
+    padw = int(np.ceil((kw - 1) / 2))
+    sequence = [
+        nn.Conv3d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
+        nn.LeakyReLU(0.2, True)
+    ]
+
+    nf_mult = 1
+    nf_mult_prev = 1
+    for n in range(1, n_layers):
         nf_mult_prev = nf_mult
-        nf_mult = min(2**n_layers, 8)
+        nf_mult = min(2 ** n, 8)
         sequence += [
             nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
-                      kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+                      kernel_size=kw, stride=2, padding=padw, bias=use_bias),
             norm_layer(ndf * nf_mult),
             nn.LeakyReLU(0.2, True)
         ]
 
-        sequence += [nn.Conv3d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]
+    nf_mult_prev = nf_mult
+    nf_mult = min(2 ** n_layers, 8)
+    sequence += [
+        nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
+                  kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+        norm_layer(ndf * nf_mult),
+        nn.LeakyReLU(0.2, True)
+    ]
 
-        if use_sigmoid:
-            sequence += [nn.Sigmoid()]
+    sequence += [nn.Conv3d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]
 
-        self.model = nn.Sequential(*sequence)
+    if use_sigmoid:
+        sequence += [nn.Sigmoid()]
+    return sequence
+
+
+def _run_discriminator_model(model, input, gpu_ids):
+    if len(gpu_ids) and isinstance(input.data, torch.cuda.FloatTensor):
+        return nn.parallel.data_parallel(model, input, gpu_ids)
+    return model(input)
+
+
+class NLayerDiscriminator(nn.Module):
+    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm3d, use_sigmoid=False, gpu_ids=[]):
+        super(NLayerDiscriminator, self).__init__()
+        self.gpu_ids = gpu_ids
+        self.model = nn.Sequential(*_patchgan_layers(input_nc, ndf, n_layers, norm_layer, use_sigmoid))
 
     def forward(self, input):
-        if len(self.gpu_ids) and isinstance(input.data, torch.cuda.FloatTensor):
-            return nn.parallel.data_parallel(self.model, input, self.gpu_ids)
-        else:
-            return self.model(input)
+        return _run_discriminator_model(self.model, input, self.gpu_ids)
 
 
 class Critic3D(nn.Module):
@@ -351,45 +373,7 @@ class Critic3D(nn.Module):
     def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm3d, gpu_ids=[]):
         super(Critic3D, self).__init__()
         self.gpu_ids = gpu_ids
-        if type(norm_layer) == functools.partial:
-            use_bias = norm_layer.func == nn.InstanceNorm3d
-        else:
-            use_bias = norm_layer == nn.InstanceNorm3d
-
-        kw = 4
-        padw = int(np.ceil((kw - 1) / 2))
-        sequence = [
-            nn.Conv3d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
-            nn.LeakyReLU(0.2, True)
-        ]
-
-        nf_mult = 1
-        nf_mult_prev = 1
-        for n in range(1, n_layers):
-            nf_mult_prev = nf_mult
-            nf_mult = min(2 ** n, 8)
-            sequence += [
-                nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
-                          kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-                norm_layer(ndf * nf_mult),
-                nn.LeakyReLU(0.2, True)
-            ]
-
-        nf_mult_prev = nf_mult
-        nf_mult = min(2 ** n_layers, 8)
-        sequence += [
-            nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
-                      kernel_size=kw, stride=1, padding=padw, bias=use_bias),
-            norm_layer(ndf * nf_mult),
-            nn.LeakyReLU(0.2, True)
-        ]
-
-        sequence += [nn.Conv3d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]
-
-        self.model = nn.Sequential(*sequence)
+        self.model = nn.Sequential(*_patchgan_layers(input_nc, ndf, n_layers, norm_layer))
 
     def forward(self, input):
-        if len(self.gpu_ids) and isinstance(input.data, torch.cuda.FloatTensor):
-            return nn.parallel.data_parallel(self.model, input, self.gpu_ids)
-        else:
-            return self.model(input)
+        return _run_discriminator_model(self.model, input, self.gpu_ids)

@@ -164,14 +164,25 @@ The generator tests verify same-size `128x128x128` output, multi-channel output,
 ## Project Structure
 
 ```text
+data/
+  paired_volume_dataset.py       # Paired LR/HR datasets and TorchIO grid patches
+  volume_io.py                   # Volume loading, tensor conversion, resizing
 models/
-  networks3d.py        # ResUNet generator, discriminator, GAN loss
-  LohiResNet_dis_patch_wo_lnp.py  # Training model wrapper
-  perceptual_loss.py   # SwinUNETR/DINO perceptual loss helpers
+  networks3d.py                  # ResUNet generator, discriminator, GAN loss
+  LohiResNet_dis_patch_wo_lnp.py # Training model wrapper
+  perceptual_builders.py         # SwinUNETR/DINO extractor construction
+  perceptual_checkpoints.py      # Perceptual checkpoint loading helpers
+  perceptual_dependencies.py     # Optional dependency and DINO repo resolution
+  perceptual_extractors.py       # SwinUNETR/DINO feature extractors
+  perceptual_loss.py             # Stable perceptual loss facade
 options/
-  base_options.py      # CLI defaults and compatibility handling
-  train_options.py     # Training-specific options
+  base_options.py                # CLI defaults, validation, device setup
+  train_options.py               # Training-specific options
 tests/
-  test_resunet3d.py    # Active generator tests
-train.py               # Dataset loader and training loop
+  test_resunet3d.py              # Active generator tests
+training/
+  logs.py                        # Loss log and plot writing
+  runner.py                      # Training loop orchestration
+  state.py                       # Training-state save/resume helpers
+train.py                         # Thin training entrypoint
 ```

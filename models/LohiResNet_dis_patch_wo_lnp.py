@@ -15,10 +15,17 @@ class LohiResNet_dis_patch_wo_lnp(BaseModel):
     def initialize(self, opt, perceptual_model=None):
         BaseModel.initialize(self, opt)
         self.isTrain = opt.isTrain
-        # define tensors
+        self._initialize_input_tensors(opt)
+        self._configure_training_flags(opt)
+        self._build_networks(opt)
+        self._load_networks_if_needed(opt)
+        if self.isTrain:
+            self._build_training_components(opt, perceptual_model)
+        self._print_networks()
+
+    def _initialize_input_tensors(self, opt):
         self.input_A = self.Tensor(opt.batchSize, opt.input_nc,
                                    opt.depthSize, opt.fineSize, opt.fineSize)
-        # For SR models, ground-truth B is at the upscaled resolution
         requested_scale = getattr(opt, 'scale_factor', 1)
         if requested_scale != 1:
             print("resunet_3d outputs the input spatial size; forcing scale_factor=1.")
@@ -28,7 +35,7 @@ class LohiResNet_dis_patch_wo_lnp(BaseModel):
         self.input_B = self.Tensor(opt.batchSize, opt.output_nc,
                                    hr_depth, hr_size, hr_size)
 
-        # load/define networks
+    def _configure_training_flags(self, opt):
         self.gp_lambda = getattr(opt, 'gp_lambda', 10.0)
         self.n_critic = getattr(opt, 'n_critic', 5)
         self.use_wgan_gp = getattr(opt, 'wgan_gp', False)
@@ -37,6 +44,7 @@ class LohiResNet_dis_patch_wo_lnp(BaseModel):
         self.lambda_gan = getattr(opt, 'lambda_gan', 1.0)
         self.perceptual_loss_fn = None
 
+    def _build_networks(self, opt):
         self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf,
                                       opt.which_model_netG, opt.norm,
                                       not opt.no_dropout, self.gpu_ids,
@@ -48,38 +56,44 @@ class LohiResNet_dis_patch_wo_lnp(BaseModel):
                                           opt.which_model_netD,
                                           opt.n_layers_D, opt.norm, use_sigmoid,
                                           self.gpu_ids, wgan_gp=self.use_wgan_gp)
+
+    def _load_networks_if_needed(self, opt):
         if not self.isTrain or opt.continue_train:
             self.load_network(self.netG, 'G', opt.which_epoch)
             if self.isTrain:
                 self.load_network(self.netD, 'D', opt.which_epoch)
 
-        if self.isTrain:
-            self.fake_AB_pool = ImagePool(opt.pool_size)
-            self.old_lr = opt.lr
-            # define loss functions
-            self.criterionGAN = networks.GANLoss(use_lsgan=not opt.no_lsgan, tensor=self.Tensor)
-            self.criterionL1 = torch.nn.L1Loss()
-            self.loss_G_Perc = self.input_A.new_tensor(0.0)
+    def _build_training_components(self, opt, perceptual_model=None):
+        self.fake_AB_pool = ImagePool(opt.pool_size)
+        self.old_lr = opt.lr
+        self.criterionGAN = networks.GANLoss(use_lsgan=not opt.no_lsgan, tensor=self.Tensor)
+        self.criterionL1 = torch.nn.L1Loss()
+        self.loss_G_Perc = self.input_A.new_tensor(0.0)
+        self.perceptual_loss_fn = self._build_perceptual_loss(opt, perceptual_model)
+        self._build_optimizers(opt)
 
-            if self.use_perceptual_loss:
-                device = next(self.netG.parameters()).device
-                extractor = build_perceptual_extractor(
-                    opt=opt,
-                    perceptual_model=perceptual_model,
-                    device=device,
-                )
-                self.perceptual_loss_fn = PerceptualLoss3D(
-                    extractor=extractor,
-                    distance=getattr(opt, 'perceptual_distance', 'l2'),
-                ).to(device)
+    def _build_perceptual_loss(self, opt, perceptual_model=None):
+        if not self.use_perceptual_loss:
+            return None
+        device = next(self.netG.parameters()).device
+        extractor = build_perceptual_extractor(
+            opt=opt,
+            perceptual_model=perceptual_model,
+            device=device,
+        )
+        return PerceptualLoss3D(
+            extractor=extractor,
+            distance=getattr(opt, 'perceptual_distance', 'l2'),
+        ).to(device)
 
-            # initialize optimizers
-            betas = (0.0, 0.9) if self.use_wgan_gp else (opt.beta1, 0.999)
-            self.optimizer_G = torch.optim.Adam(self.netG.parameters(),
-                                                lr=opt.lr, betas=betas)
-            self.optimizer_D = torch.optim.Adam(self.netD.parameters(),
-                                                lr=opt.lr, betas=betas)
+    def _build_optimizers(self, opt):
+        betas = (0.0, 0.9) if self.use_wgan_gp else (opt.beta1, 0.999)
+        self.optimizer_G = torch.optim.Adam(self.netG.parameters(),
+                                            lr=opt.lr, betas=betas)
+        self.optimizer_D = torch.optim.Adam(self.netD.parameters(),
+                                            lr=opt.lr, betas=betas)
 
+    def _print_networks(self):
         print('---------- Networks initialized -------------')
         networks.print_network(self.netG)
         if self.isTrain:
@@ -125,59 +139,77 @@ class LohiResNet_dis_patch_wo_lnp(BaseModel):
         gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * self.gp_lambda
         return gradient_penalty
 
-    def backward_D(self):
+    def _discriminator_pairs(self, detach_fake: bool):
         real_A_for_D = self.real_A
         real_AB = torch.cat((real_A_for_D, self.real_B), 1)
-        fake_AB = torch.cat((real_A_for_D, self.fake_B.detach()), 1)
+        fake_B = self.fake_B.detach() if detach_fake else self.fake_B
+        fake_AB = torch.cat((real_A_for_D, fake_B), 1)
+        return real_AB, fake_AB
 
+    def _backward_wgan_discriminator(self, real_AB, fake_AB, pred_real, pred_fake):
+        gp = self._gradient_penalty(real_AB.data, fake_AB.data)
+        self.loss_D = pred_fake.mean() - pred_real.mean() + gp
+        self.loss_D_real = -pred_real.mean()
+        self.loss_D_fake = pred_fake.mean()
+        self.loss_D.backward()
+
+    def _backward_gan_discriminator(self, pred_real, pred_fake):
+        self.loss_D_fake = self.criterionGAN(pred_fake, False)
+        self.loss_D_real = self.criterionGAN(pred_real, True)
+        self.loss_D = (self.loss_D_fake + self.loss_D_real) * 0.5
+        self.loss_D.backward()
+
+    def backward_D(self):
+        real_AB, fake_AB = self._discriminator_pairs(detach_fake=True)
         pred_real = self.netD(real_AB)
         pred_fake = self.netD(fake_AB)
 
         if self.use_wgan_gp:
-            gp = self._gradient_penalty(real_AB.data, fake_AB.data)
-            self.loss_D = pred_fake.mean() - pred_real.mean() + gp
-            self.loss_D_real = -pred_real.mean()
-            self.loss_D_fake = pred_fake.mean()
-            self.loss_D.backward()
+            self._backward_wgan_discriminator(real_AB, fake_AB, pred_real, pred_fake)
         else:
-            self.loss_D_fake = self.criterionGAN(pred_fake, False)
-            self.loss_D_real = self.criterionGAN(pred_real, True)
-            self.loss_D = (self.loss_D_fake + self.loss_D_real) * 0.5
-            self.loss_D.backward()
+            self._backward_gan_discriminator(pred_real, pred_fake)
 
-    def backward_G(self):
-        real_A_for_D = self.real_A
-        fake_AB = torch.cat((real_A_for_D, self.fake_B), 1)
-        pred_fake = self.netD(fake_AB)
-
+    def _generator_gan_loss(self, pred_fake):
         if self.use_wgan_gp:
-            self.loss_G_GAN = -pred_fake.mean()
-        else:
-            self.loss_G_GAN = self.criterionGAN(pred_fake, True)
+            return -pred_fake.mean()
+        return self.criterionGAN(pred_fake, True)
 
-        self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
+    def _generator_reconstruction_loss(self):
+        return self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
+
+    def _generator_perceptual_loss(self):
         if self.use_perceptual_loss and self.perceptual_loss_fn is not None:
             raw_perceptual = self.perceptual_loss_fn(self.fake_B, self.real_B)
-            self.loss_G_Perc = raw_perceptual * self.lambda_perceptual
-        else:
-            self.loss_G_Perc = self.fake_B.new_tensor(0.0)
+            return raw_perceptual * self.lambda_perceptual
+        return self.fake_B.new_tensor(0.0)
 
+    def backward_G(self):
+        _real_AB, fake_AB = self._discriminator_pairs(detach_fake=False)
+        pred_fake = self.netD(fake_AB)
+
+        self.loss_G_GAN = self._generator_gan_loss(pred_fake)
+        self.loss_G_L1 = self._generator_reconstruction_loss()
+        self.loss_G_Perc = self._generator_perceptual_loss()
         self.loss_G = (self.lambda_gan * self.loss_G_GAN) + self.loss_G_L1 + self.loss_G_Perc
         self.loss_G.backward()
+
+    def _run_discriminator_step(self):
+        self.optimizer_D.zero_grad()
+        self.backward_D()
+        self.optimizer_D.step()
+
+    def _run_generator_step(self):
+        self.optimizer_G.zero_grad()
+        self.backward_G()
+        self.optimizer_G.step()
 
     def optimize_parameters(self):
         self.forward()
 
-        # Critic updates
         for _ in range(self.n_critic if self.use_wgan_gp else 1):
-            self.optimizer_D.zero_grad()
-            self.backward_D()
-            self.optimizer_D.step()
+            self._run_discriminator_step()
 
-        # Generator update
-        self.optimizer_G.zero_grad()
-        self.backward_G()
-        self.optimizer_G.step()
+        self._run_generator_step()
 
     def get_current_errors(self):
         return OrderedDict([('G_GAN', self.loss_G_GAN.item()),

@@ -129,59 +129,69 @@ class BaseOptions():
                 scale_factor=1,
             )
 
-    def parse(self):
-        if not self.initialized:
-            self.initialize()
-        self._apply_research_profile_defaults()
-        self.opt = self.parser.parse_args()
-        self.opt.isTrain = self.isTrain
-
-        if self.opt.which_model_netG != 'resunet_3d':
-            print("Generator '%s' is deprecated; using 'resunet_3d'." % self.opt.which_model_netG)
-            self.opt.which_model_netG = 'resunet_3d'
-        if self.opt.scale_factor != 1:
+    def _normalize_legacy_options(self, opt):
+        if opt.which_model_netG != 'resunet_3d':
+            print("Generator '%s' is deprecated; using 'resunet_3d'." % opt.which_model_netG)
+            opt.which_model_netG = 'resunet_3d'
+        if opt.scale_factor != 1:
             print("resunet_3d outputs the input spatial size; forcing scale_factor=1.")
-            self.opt.scale_factor = 1
-        if self.opt.patch_size < 0:
+            opt.scale_factor = 1
+
+    @staticmethod
+    def _validate_patch_options(opt):
+        if opt.patch_size < 0:
             raise ValueError('--patch_size must be >= 0.')
-        if self.opt.patch_overlap < 0:
+        if opt.patch_overlap < 0:
             raise ValueError('--patch_overlap must be >= 0.')
-        if self.opt.patch_size > 0 and self.opt.patch_overlap >= self.opt.patch_size:
+        if opt.patch_size > 0 and opt.patch_overlap >= opt.patch_size:
             raise ValueError('--patch_overlap must be smaller than --patch_size.')
 
-        str_ids = self.opt.gpu_ids.split(',')
-        self.opt.gpu_ids = []
+    @staticmethod
+    def _parse_gpu_ids(opt):
+        str_ids = opt.gpu_ids.split(',')
+        opt.gpu_ids = []
         for str_id in str_ids:
             gid = int(str_id)
             if gid >= 0:
-                self.opt.gpu_ids.append(gid)
+                opt.gpu_ids.append(gid)
 
-        if self.opt.device == 'cpu':
-            self.opt.gpu_ids = []
-            self.opt.device = 'cpu'
-        elif self.opt.device == 'cuda':
+    def _configure_device(self, opt):
+        self._parse_gpu_ids(opt)
+        if opt.device == 'cpu':
+            opt.gpu_ids = []
+            opt.device = 'cpu'
+        elif opt.device == 'cuda':
             if not torch.cuda.is_available():
                 raise RuntimeError('CUDA requested via --device cuda, but CUDA is not available.')
-            if len(self.opt.gpu_ids) == 0:
-                self.opt.gpu_ids = [0]
-            torch.cuda.set_device(self.opt.gpu_ids[0])
-            self.opt.device = 'cuda'
+            if len(opt.gpu_ids) == 0:
+                opt.gpu_ids = [0]
+            torch.cuda.set_device(opt.gpu_ids[0])
+            opt.device = 'cuda'
         else:
-            if torch.cuda.is_available() and len(self.opt.gpu_ids) > 0:
-                torch.cuda.set_device(self.opt.gpu_ids[0])
-                self.opt.device = 'cuda'
+            if torch.cuda.is_available() and len(opt.gpu_ids) > 0:
+                torch.cuda.set_device(opt.gpu_ids[0])
+                opt.device = 'cuda'
             else:
-                self.opt.gpu_ids = []
-                self.opt.device = 'cpu'
+                opt.gpu_ids = []
+                opt.device = 'cpu'
 
-        args = vars(self.opt)
+    def _validate_options(self, opt):
+        self._normalize_legacy_options(opt)
+        self._validate_patch_options(opt)
+        self._configure_device(opt)
 
+    @staticmethod
+    def _print_options(opt):
+        args = vars(opt)
         print('------------ Options -------------')
         for k, v in sorted(args.items()):
             print('%s: %s' % (str(k), str(v)))
         print('-------------- End ----------------')
 
-        expr_dir = os.path.join(self.opt.checkpoints_dir, self.opt.name)
+    @staticmethod
+    def _write_options(opt):
+        args = vars(opt)
+        expr_dir = os.path.join(opt.checkpoints_dir, opt.name)
         util.mkdirs(expr_dir)
         file_name = os.path.join(expr_dir, 'opt.txt')
         with open(file_name, 'wt') as opt_file:
@@ -189,4 +199,14 @@ class BaseOptions():
             for k, v in sorted(args.items()):
                 opt_file.write('%s: %s\n' % (str(k), str(v)))
             opt_file.write('-------------- End ----------------\n')
+
+    def parse(self):
+        if not self.initialized:
+            self.initialize()
+        self._apply_research_profile_defaults()
+        self.opt = self.parser.parse_args()
+        self.opt.isTrain = self.isTrain
+        self._validate_options(self.opt)
+        self._print_options(self.opt)
+        self._write_options(self.opt)
         return self.opt
