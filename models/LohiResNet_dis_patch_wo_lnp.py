@@ -8,9 +8,9 @@ from . import networks3d as networks
 from .perceptual_loss import PerceptualLoss3D, build_perceptual_extractor
 
 
-class Pix2Pix3dModel(BaseModel):
+class LohiResNet_dis_patch_wo_lnp(BaseModel):
     def name(self):
-        return 'Pix2Pix3dModel'
+        return 'LohiResNet_dis_patch_wo_lnp'
 
     def initialize(self, opt, perceptual_model=None):
         BaseModel.initialize(self, opt)

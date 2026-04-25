@@ -35,7 +35,7 @@ class BaseOptions():
                                  help='execution device. auto uses CUDA when available and gpu_ids is not -1')
         self.parser.add_argument('--name', type=str, default='experiment_name', help='name of the experiment')
         self.parser.add_argument('--dataset_mode', type=str, default='unaligned', help='dataset loading mode')
-        self.parser.add_argument('--model', type=str, default='pix2pix3d',
+        self.parser.add_argument('--model', type=str, default='LohiResNet_dis_patch_wo_lnp',
                                  help='chooses which model to use.')
         self.parser.add_argument('--which_direction', type=str, default='AtoB', help='AtoB or BtoA')
         self.parser.add_argument('--lr_subdir', type=str, default='',

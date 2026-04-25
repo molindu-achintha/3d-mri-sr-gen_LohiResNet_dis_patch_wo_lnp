@@ -2,6 +2,7 @@
 
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +17,14 @@ from models.perceptual_loss import (  # noqa: E402
     SwinUNETRFeatureExtractor,
     build_perceptual_extractor,
 )
-from models.pix2pix3d_model import Pix2Pix3dModel  # noqa: E402
+from models.LohiResNet_dis_patch_wo_lnp import LohiResNet_dis_patch_wo_lnp  # noqa: E402
+
+
+DINOV3_CHECKPOINT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "DINOV3"
+    / "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
+)
 
 
 def _make_opt(tmp_path, use_perceptual=False, backbone="dinov3", lambda_gan=1.0):
@@ -134,7 +142,7 @@ class TinySwinLike(nn.Module):
 
 def test_perceptual_disabled_has_zero_component(tmp_path):
     opt = _make_opt(tmp_path, use_perceptual=False, lambda_gan=1.0)
-    model = Pix2Pix3dModel()
+    model = LohiResNet_dis_patch_wo_lnp()
     model.initialize(opt)
     data = {
         "A": torch.randn(1, 1, opt.depthSize, opt.fineSize, opt.fineSize),
@@ -154,7 +162,7 @@ def test_perceptual_disabled_has_zero_component(tmp_path):
 
 def test_lambda_gan_zero_excludes_gan_term_from_total_loss(tmp_path):
     opt = _make_opt(tmp_path, use_perceptual=True, backbone="dinov3", lambda_gan=0.0)
-    model = Pix2Pix3dModel()
+    model = LohiResNet_dis_patch_wo_lnp()
     model.initialize(opt, perceptual_model=TinyPerceptual2D())
     data = {
         "A": torch.randn(1, 1, opt.depthSize, opt.fineSize, opt.fineSize),
@@ -171,7 +179,7 @@ def test_lambda_gan_zero_excludes_gan_term_from_total_loss(tmp_path):
 
 def test_injected_perceptual_model_contributes_and_backprops(tmp_path):
     opt = _make_opt(tmp_path, use_perceptual=True, backbone="dinov3")
-    model = Pix2Pix3dModel()
+    model = LohiResNet_dis_patch_wo_lnp()
     model.initialize(opt, perceptual_model=TinyPerceptual2D())
     data = {
         "A": torch.randn(1, 1, opt.depthSize, opt.fineSize, opt.fineSize),
@@ -191,7 +199,7 @@ def test_pix2pix_optimizes_one_64_cube_patch(tmp_path):
     opt = _make_opt(tmp_path, use_perceptual=False)
     opt.depthSize = 64
     opt.fineSize = 64
-    model = Pix2Pix3dModel()
+    model = LohiResNet_dis_patch_wo_lnp()
     model.initialize(opt)
     data = {
         "A": torch.randn(1, 1, opt.depthSize, opt.fineSize, opt.fineSize),
@@ -330,6 +338,8 @@ def test_local_dinov3_pretrained_requires_checkpoint(tmp_path):
 
 
 def test_local_dinov3_repo_loader_bypasses_timm(tmp_path, monkeypatch):
+    assert DINOV3_CHECKPOINT_PATH.exists()
+
     repo_path = tmp_path / "dinov3"
     (repo_path / "dinov3" / "hub").mkdir(parents=True)
     (repo_path / "dinov3" / "hub" / "backbones.py").write_text("# stub\n", encoding="utf-8")
@@ -346,14 +356,19 @@ def test_local_dinov3_repo_loader_bypasses_timm(tmp_path, monkeypatch):
         "models.perceptual_loss._get_timm_module",
         lambda: (_ for _ in ()).throw(AssertionError("timm should not be used")),
     )
+    loaded_checkpoints = []
+    monkeypatch.setattr(
+        "models.perceptual_loss._load_weights",
+        lambda _model, ckpt_path: loaded_checkpoints.append(str(ckpt_path)),
+    )
 
     opt = SimpleNamespace(
         perceptual_backbone="dinov3",
         perceptual_model_arch="dinov3_vitb16",
         perceptual_swin_feature_layers="encoder1,encoder2,encoder3,encoder4",
         perceptual_dino_input_size=224,
-        perceptual_model_ckpt="",
-        perceptual_pretrained=False,
+        perceptual_model_ckpt=str(DINOV3_CHECKPOINT_PATH),
+        perceptual_pretrained=True,
         perceptual_dinov3_repo=str(repo_path),
         gpu_ids=[],
     )
@@ -362,7 +377,11 @@ def test_local_dinov3_repo_loader_bypasses_timm(tmp_path, monkeypatch):
 
     assert isinstance(extractor, DinoV3FeatureExtractor)
     assert isinstance(extractor.model, TinyPerceptual2D)
-    assert extractor.model.factory_args == {"pretrained": False, "weights": None}
+    assert extractor.model.factory_args == {
+        "pretrained": True,
+        "weights": str(DINOV3_CHECKPOINT_PATH),
+    }
+    assert loaded_checkpoints == [str(DINOV3_CHECKPOINT_PATH)]
 
 
 def test_unknown_local_dinov3_arch_raises_clear_error(tmp_path, monkeypatch):

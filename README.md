@@ -166,7 +166,7 @@ The generator tests verify same-size `128x128x128` output, multi-channel output,
 ```text
 models/
   networks3d.py        # ResUNet generator, discriminator, GAN loss
-  pix2pix3d_model.py   # Training model wrapper
+  LohiResNet_dis_patch_wo_lnp.py  # Training model wrapper
   perceptual_loss.py   # SwinUNETR/DINO perceptual loss helpers
 options/
   base_options.py      # CLI defaults and compatibility handling

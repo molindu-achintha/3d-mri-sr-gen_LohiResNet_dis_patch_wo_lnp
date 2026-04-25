@@ -1,5 +1,5 @@
 def create_model(opt, perceptual_model=None):
-    from .pix2pix3d_model import Pix2Pix3dModel
-    model = Pix2Pix3dModel()
+    from .LohiResNet_dis_patch_wo_lnp import LohiResNet_dis_patch_wo_lnp
+    model = LohiResNet_dis_patch_wo_lnp()
     model.initialize(opt, perceptual_model=perceptual_model)
     return model
