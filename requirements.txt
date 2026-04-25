@@ -1,0 +1,18 @@
+# Core numerical + deep learning
+numpy
+torch
+
+# Image/volume I/O
+Pillow
+nibabel
+
+# Training logs/plots
+matplotlib
+
+# Optional utility used by util/patch_inference.py
+torchio
+timm
+monai
+
+# Tests
+pytest
